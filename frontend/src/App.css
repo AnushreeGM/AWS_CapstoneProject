@@ -1,0 +1,110 @@
+.App {
+  text-align: center;
+}
+
+.App-header {
+  background-color: #282c34;
+  padding: 20px;
+  color: white;
+  min-height: 100vh;
+}
+
+.form-container {
+  background-color: #3a3f47;
+  padding: 20px;
+  margin: 20px auto;
+  border-radius: 8px;
+  max-width: 400px;
+}
+
+.form-group {
+  margin-bottom: 15px;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 16px;
+  box-sizing: border-box;
+}
+
+button {
+  background-color: #61dafb;
+  color: #282c34;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: bold;
+}
+
+button:hover {
+  background-color: #21a9c7;
+}
+
+button:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+
+.error {
+  color: #ff6b6b;
+  margin-top: 10px;
+  padding: 10px;
+  background-color: #ffe0e0;
+  border-radius: 4px;
+  border: 1px solid #ff6b6b;
+}
+
+.users-container {
+  margin-top: 30px;
+}
+
+.users-list {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.user-card {
+  background-color: #3a3f47;
+  padding: 20px;
+  border-radius: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.user-info {
+  text-align: left;
+}
+
+.user-info h3 {
+  margin: 0 0 5px 0;
+  color: #61dafb;
+}
+
+.user-info p {
+  margin: 0 0 5px 0;
+  color: #ccc;
+}
+
+.user-info small {
+  color: #888;
+}
+
+.delete-btn {
+  background-color: #ff6b6b;
+  color: white;
+  padding: 8px 16px;
+  font-size: 14px;
+}
+
+.delete-btn:hover {
+  background-color: #ff5252;
+}

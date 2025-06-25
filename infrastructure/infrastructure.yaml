@@ -1,0 +1,723 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Infrastructure Stack - EKS, CodeCommit, ECR, RDS MySQL, SonarQube Instance'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: fullstack-demo
+    Description: Name of the project (used for resource naming)
+  
+  # Removed KeyPairName parameter - using Session Manager for access
+  
+  AllowedCIDR:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR block allowed to access SonarQube (restrict for security)
+  
+  DBUsername:
+    Type: String
+    Default: admin
+    Description: RDS MySQL master username
+  
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: RDS MySQL master password (minimum 8 characters)
+
+Resources:
+  # VPC and Networking
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpc'
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-subnet-1'
+        - Key: !Sub 'kubernetes.io/cluster/${ProjectName}-eks-cluster'
+          Value: shared
+        - Key: kubernetes.io/role/elb
+          Value: '1'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-subnet-2'
+        - Key: !Sub 'kubernetes.io/cluster/${ProjectName}-eks-cluster'
+          Value: shared
+        - Key: kubernetes.io/role/elb
+          Value: '1'
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-subnet-1'
+        - Key: !Sub 'kubernetes.io/cluster/${ProjectName}-eks-cluster'
+          Value: owned
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-subnet-2'
+        - Key: !Sub 'kubernetes.io/cluster/${ProjectName}-eks-cluster'
+          Value: owned
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-igw'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # NAT Gateway for private subnet internet access
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-nat-eip'
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-nat-gateway'
+
+  # Private Route Table
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-rt'
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # Security Groups
+  EKSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EKS cluster
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 1025
+          ToPort: 65535
+          CidrIp: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-eks-sg'
+
+  EKSNodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EKS worker nodes
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 1025
+          ToPort: 65535
+          CidrIp: 10.0.0.0/16
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/16
+        - IpProtocol: -1
+          CidrIp: 10.0.0.0/16
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-eks-node-sg'
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS MySQL
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 10.0.0.0/16
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref SonarQubeSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rds-sg'
+
+  SonarQubeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for SonarQube instance
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedCIDR
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9000
+          CidrIp: !Ref AllowedCIDR
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedCIDR
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AllowedCIDR
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-sonarqube-sg'
+
+  # IAM Roles for EKS
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-eks-cluster-role'
+
+  EKSNodeGroupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-eks-nodegroup-role'
+
+  # EKS Cluster
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Sub '${ProjectName}-eks-cluster'
+      Version: '1.28'
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      ResourcesVpcConfig:
+        SecurityGroupIds:
+          - !Ref EKSSecurityGroup
+        SubnetIds:
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-eks-cluster'
+
+  # EKS Node Group
+  EKSNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn: EKSCluster
+    Properties:
+      ClusterName: !Ref EKSCluster
+      NodegroupName: !Sub '${ProjectName}-nodegroup'
+      NodeRole: !GetAtt EKSNodeGroupRole.Arn
+      InstanceTypes:
+        - t3.medium
+      AmiType: AL2_x86_64
+      CapacityType: ON_DEMAND
+      ScalingConfig:
+        MinSize: 1
+        MaxSize: 3
+        DesiredSize: 2
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        Name: !Sub '${ProjectName}-nodegroup'
+
+  # RDS Subnet Group
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS MySQL
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rds-subnet-group'
+
+  # RDS MySQL Instance
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${ProjectName}-mysql-db'
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      EngineVersion: '8.0.35'
+      AllocatedStorage: 20
+      StorageType: gp2
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBName: appdb
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      BackupRetentionPeriod: 7
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-mysql-db'
+
+  # ECR Repositories
+  FrontendECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-frontend'
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-frontend-ecr'
+
+  BackendECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-backend'
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-backend-ecr'
+
+  # CodeCommit Repositories
+  FrontendCodeCommitRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-frontend-repo'
+      RepositoryDescription: Frontend React application repository
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-frontend-repo'
+
+  BackendCodeCommitRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-backend-repo'
+      RepositoryDescription: Backend Node.js API repository
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-backend-repo'
+
+  # SonarQube EC2 Instance
+  SonarQubeInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-042b4708b1d05f512  # Ubuntu 20.04 LTS (eu-north-1 region)
+      InstanceType: t3.medium
+      SecurityGroupIds:
+        - !Ref SonarQubeSecurityGroup
+      SubnetId: !Ref PublicSubnet1
+      IamInstanceProfile: !Ref SonarQubeInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          
+          # Update system
+          apt-get update -y
+          apt-get upgrade -y
+          
+          # Install Docker
+          apt-get install -y docker.io curl unzip
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ubuntu
+          
+          # Install AWS CLI v2
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          ./aws/install
+          rm -rf aws awscliv2.zip
+          
+          # Install Session Manager Agent
+          snap install amazon-ssm-agent --classic
+          systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service
+          systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service
+          
+          # Set system limits for SonarQube
+          echo 'vm.max_map_count=524288' >> /etc/sysctl.conf
+          echo 'fs.file-max=131072' >> /etc/sysctl.conf
+          sysctl -p
+          
+          # Create SonarQube directory
+          mkdir -p /opt/sonarqube
+          
+          # Create simple SonarQube startup script
+          cat > /opt/sonarqube/start-sonarqube.sh << 'SCRIPT'
+          #!/bin/bash
+          set -e
+          
+          echo "🚀 Starting SonarQube..."
+          
+          # Stop any existing SonarQube container
+          docker stop sonarqube 2>/dev/null || true
+          docker rm sonarqube 2>/dev/null || true
+          
+          # Start SonarQube with port forwarding 80->9000
+          docker run -d \
+            --name sonarqube \
+            --restart unless-stopped \
+            -p 80:9000 \
+            -p 9000:9000 \
+            -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
+            -v sonarqube_data:/opt/sonarqube/data \
+            -v sonarqube_extensions:/opt/sonarqube/extensions \
+            -v sonarqube_logs:/opt/sonarqube/logs \
+            --ulimit nofile=65536:65536 \
+            sonarqube:9.9.2-community
+          
+          echo "✅ SonarQube started successfully!"
+          echo "🌐 Access at: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)"
+          echo "🌐 Also available at: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):9000"
+          echo "🔑 Default login: admin/admin"
+          SCRIPT
+          
+          chmod +x /opt/sonarqube/start-sonarqube.sh
+          
+          # Create stop script
+          cat > /opt/sonarqube/stop-sonarqube.sh << 'SCRIPT'
+          #!/bin/bash
+          echo "🛑 Stopping SonarQube..."
+          docker stop sonarqube 2>/dev/null || true
+          docker rm sonarqube 2>/dev/null || true
+          echo "✅ SonarQube stopped!"
+          SCRIPT
+          
+          chmod +x /opt/sonarqube/stop-sonarqube.sh
+          
+          # Create status check script
+          cat > /opt/sonarqube/status-sonarqube.sh << 'SCRIPT'
+          #!/bin/bash
+          if docker ps | grep -q sonarqube; then
+            echo "✅ SonarQube is running"
+            echo "🌐 URL: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)"
+            echo "🌐 Alt URL: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):9000"
+          else
+            echo "❌ SonarQube is not running"
+            echo "💡 Run: sudo /opt/sonarqube/start-sonarqube.sh"
+          fi
+          SCRIPT
+          
+          chmod +x /opt/sonarqube/status-sonarqube.sh
+          
+          # Wait for Docker to be ready
+          sleep 10
+          
+          # Start SonarQube
+          /opt/sonarqube/start-sonarqube.sh
+          
+          # Create systemd service for auto-start
+          cat > /etc/systemd/system/sonarqube.service << 'SERVICE'
+          [Unit]
+          Description=SonarQube Service
+          After=docker.service
+          Requires=docker.service
+          
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/opt/sonarqube/start-sonarqube.sh
+          ExecStop=/opt/sonarqube/stop-sonarqube.sh
+          User=root
+          
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+          
+          systemctl daemon-reload
+          systemctl enable sonarqube
+          
+          echo "🎉 SonarQube installation completed!"
+          
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-sonarqube'
+
+  # IAM Role for SonarQube Instance
+  SonarQubeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-sonarqube-role'
+
+  SonarQubeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref SonarQubeInstanceRole
+
+Outputs:
+  # EKS Cluster Information
+  EKSClusterName:
+    Description: EKS Cluster Name
+    Value: !Ref EKSCluster
+    Export:
+      Name: !Sub '${ProjectName}-EKSClusterName'
+
+  EKSClusterEndpoint:
+    Description: EKS Cluster Endpoint
+    Value: !GetAtt EKSCluster.Endpoint
+    Export:
+      Name: !Sub '${ProjectName}-EKSClusterEndpoint'
+
+  # ECR Repository URLs
+  FrontendECRRepositoryURI:
+    Description: Frontend ECR Repository URI
+    Value: !GetAtt FrontendECRRepository.RepositoryUri
+    Export:
+      Name: !Sub '${ProjectName}-FrontendECRRepositoryURI'
+
+  BackendECRRepositoryURI:
+    Description: Backend ECR Repository URI
+    Value: !GetAtt BackendECRRepository.RepositoryUri
+    Export:
+      Name: !Sub '${ProjectName}-BackendECRRepositoryURI'
+
+  # CodeCommit Repository URLs
+  FrontendCodeCommitCloneURL:
+    Description: Frontend CodeCommit Repository Clone URL (HTTPS)
+    Value: !GetAtt FrontendCodeCommitRepo.CloneUrlHttp
+    Export:
+      Name: !Sub '${ProjectName}-FrontendCodeCommitCloneURL'
+
+  BackendCodeCommitCloneURL:
+    Description: Backend CodeCommit Repository Clone URL (HTTPS)
+    Value: !GetAtt BackendCodeCommitRepo.CloneUrlHttp
+    Export:
+      Name: !Sub '${ProjectName}-BackendCodeCommitCloneURL'
+
+  # RDS Information
+  RDSEndpoint:
+    Description: RDS MySQL Endpoint
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: !Sub '${ProjectName}-RDSEndpoint'
+
+  RDSPort:
+    Description: RDS MySQL Port
+    Value: !GetAtt RDSInstance.Endpoint.Port
+    Export:
+      Name: !Sub '${ProjectName}-RDSPort'
+
+  RDSUsername:
+    Description: RDS MySQL Master Username
+    Value: !Ref DBUsername
+    Export:
+      Name: !Sub '${ProjectName}-RDSUsername'
+
+  RDSDatabaseName:
+    Description: RDS MySQL Database Name
+    Value: appdb
+    Export:
+      Name: !Sub '${ProjectName}-RDSDatabaseName'
+
+  # SonarQube Information
+  SonarQubePublicIP:
+    Description: SonarQube Instance Public IP
+    Value: !GetAtt SonarQubeInstance.PublicIp
+    Export:
+      Name: !Sub '${ProjectName}-SonarQubePublicIP'
+
+  SonarQubeURL:
+    Description: SonarQube Web Interface URL
+    Value: !Sub 'http://${SonarQubeInstance.PublicIp}:9000'
+    Export:
+      Name: !Sub '${ProjectName}-SonarQubeURL'
+
+  SonarQubeInstanceId:
+    Description: SonarQube EC2 Instance ID
+    Value: !Ref SonarQubeInstance
+    Export:
+      Name: !Sub '${ProjectName}-SonarQubeInstanceId'
+
+  # VPC Information (for pipeline use)
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${ProjectName}-VPCId'
+
+  PublicSubnet1Id:
+    Description: Public Subnet 1 ID
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub '${ProjectName}-PublicSubnet1Id'
+
+  PublicSubnet2Id:
+    Description: Public Subnet 2 ID
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub '${ProjectName}-PublicSubnet2Id'

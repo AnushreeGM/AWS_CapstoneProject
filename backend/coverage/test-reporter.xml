@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testExecutions version="1">
+    <file path="/home/pc/Desktop/code/appcode/backend/__tests__/server.test.js">
+        <testCase name="Backend Server Health Check should return health status" duration="36"/>
+        <testCase name="Backend Server API Endpoints should handle unknown routes" duration="12"/>
+    </file>
+</testExecutions>
