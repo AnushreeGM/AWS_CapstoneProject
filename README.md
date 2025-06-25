@@ -2,6 +2,9 @@
 
 This project demonstrates a complete CI/CD pipeline deployment of a **3-tier web application** using **CloudFormation** and **Terraform** in different AWS regions. The application is deployed into an **Amazon EKS cluster** with Docker containers managed via **ECR**, and monitored using **CloudWatch Container Insights**.
 
+![image](https://github.com/user-attachments/assets/fee8db16-f222-4bc9-95f4-39755c256bfe)
+
+
 ## 🔧 Key Components
 
 - **3-Tier Architecture** (Frontend, Backend, MySQL Database)
