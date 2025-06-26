@@ -39,7 +39,7 @@ Please refer to the detailed guides in the respective directories:
   [cloudformation/README.md](./cloudformation/README.md)
 
 - **Monitoring Setup:**  
-  [Kubernetes_Container_Insights.json](./cloudwath_insightdoc.md)
+  [cloudwath_insightdoc.md](./cloudwath_insightdoc.md)
 
 ---
 
